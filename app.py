@@ -9,7 +9,11 @@ st.title("CVAT Video XML Attribute Editor")
 st.markdown(
     """
 Upload a CVAT **video XML** (`annotations.xml` from a *video* task).  
-Select an attribute → choose tracks (or all tracks) → update values for entire track or first N frames.
+Then:
+1. Choose tracks (or apply to all tracks)  
+2. Select **multiple attributes**  
+3. For each attribute, set new value + frame scope  
+4. Download the modified XML
 """
 )
 
@@ -19,17 +23,17 @@ if not uploaded_file:
     st.info("👆 Upload a CVAT video XML file to get started.")
     st.stop()
 
-# Read bytes
 xml_bytes = uploaded_file.getvalue()
 
+# -----------------------------
 # Parse XML
+# -----------------------------
 try:
     root = ET.fromstring(xml_bytes)
 except ET.ParseError as e:
     st.error(f"❌ Failed to parse XML: {e}")
     st.stop()
 
-# Debug info
 st.subheader("Debug Info")
 st.write(f"Root tag: `{root.tag}`")
 
@@ -37,12 +41,14 @@ tracks = root.findall(".//track")
 st.write(f"Found **{len(tracks)}** `<track>` elements.")
 
 if not tracks:
-    st.error("No `<track>` found. This is not a CVAT video XML.")
+    st.error("No `<track>` found. This is probably not a CVAT *video* XML export.")
     st.stop()
 
-# Collect attribute info
-attribute_values = {}
-track_infos = []
+# -----------------------------
+# Collect track & attribute info
+# -----------------------------
+attribute_values = {}   # {attr_name: set(values)}
+track_infos = []        # list of dicts for display table
 
 for track in tracks:
     t_id = track.get("id", "")
@@ -52,46 +58,38 @@ for track in tracks:
     # Track-level attributes
     for attr in track.findall("attribute"):
         name = attr.get("name")
-        if name:
-            attr_names.add(name)
-            attribute_values.setdefault(name, set()).add((attr.text or "").strip())
+        if not name:
+            continue
+        attr_names.add(name)
+        attribute_values.setdefault(name, set()).add((attr.text or "").strip())
 
     # Box-level attributes
     for box in track.findall("box"):
         for attr in box.findall("attribute"):
             name = attr.get("name")
-            if name:
-                attr_names.add(name)
-                attribute_values.setdefault(name, set()).add((attr.text or "").strip())
+            if not name:
+                continue
+            attr_names.add(name)
+            attribute_values.setdefault(name, set()).add((attr.text or "").strip())
 
     track_infos.append({
         "Track ID": t_id,
         "Label": label,
-        "Attributes": ", ".join(sorted(attr_names)) if attr_names else "",
+        "Attributes in track": ", ".join(sorted(attr_names)) if attr_names else "",
     })
 
 if not attribute_values:
-    st.error("No `<attribute>` elements found in this file.")
+    st.error("No `<attribute>` elements found under tracks/boxes.")
     st.stop()
 
 st.subheader("Tracks Overview")
 st.dataframe(pd.DataFrame(track_infos), use_container_width=True)
 
 # -----------------------------
-# Attribute selection
+# Track selection (ALL / specific)
 # -----------------------------
-st.subheader("Edit Attributes")
+st.subheader("1️⃣ Select tracks")
 
-attr_name = st.selectbox(
-    "Choose attribute to modify",
-    sorted(attribute_values.keys())
-)
-
-existing_values = sorted(v for v in attribute_values[attr_name] if v)
-
-# -----------------------------
-# Track selection mode (ALL / specific)
-# -----------------------------
 track_selection_mode = st.radio(
     "Track selection mode",
     ["Apply to ALL tracks", "Select specific tracks"],
@@ -105,7 +103,7 @@ track_label_to_id = {
 
 if track_selection_mode == "Select specific tracks":
     selected_track_labels = st.multiselect(
-        "Select the tracks",
+        "Select tracks",
         list(track_label_to_id.keys())
     )
     selected_track_ids = {track_label_to_id[l] for l in selected_track_labels}
@@ -120,89 +118,160 @@ else:
 st.write(f"Tracks chosen: **{len(selected_track_ids)}**")
 
 # -----------------------------
-# New value input
+# Attribute change rules (multiple)
 # -----------------------------
-value_choice = st.selectbox(
-    "New value",
-    existing_values + ["⟶ Custom value"]
+st.subheader("2️⃣ Define attribute changes")
+
+all_attr_names = sorted(attribute_values.keys())
+
+selected_attrs = st.multiselect(
+    "Choose attributes to modify (you can select multiple)",
+    all_attr_names
 )
 
-if value_choice == "⟶ Custom value":
-    new_value = st.text_input("Custom value", value="")
-else:
-    new_value = value_choice
+if not selected_attrs:
+    st.info("Select at least one attribute to set up change rules.")
+    st.stop()
 
-# -----------------------------
-# Frame range mode
-# -----------------------------
-mode = st.radio(
-    "Where to apply the change?",
-    ["Entire track", "First N frames"],
-    horizontal=True
-)
+st.markdown("#### Change rules")
 
-num_frames = None
-if mode == "First N frames":
-    num_frames = st.number_input(
-        "Number of frames",
-        min_value=1,
-        value=10,
-        step=1
+rules = []  # We'll build them from session_state when applying
+
+for attr_name in selected_attrs:
+    st.markdown(f"**Attribute: `{attr_name}`**")
+
+    existing_vals = sorted(v for v in attribute_values[attr_name] if v)
+
+    # New value choice
+    value_choice = st.selectbox(
+        f"New value for `{attr_name}`",
+        existing_vals + ["⟶ Custom value"],
+        key=f"value_choice_{attr_name}",
     )
 
+    if value_choice == "⟶ Custom value":
+        custom_value = st.text_input(
+            f"Custom value for `{attr_name}`",
+            value="",
+            key=f"custom_value_{attr_name}",
+        )
+    else:
+        custom_value = ""
+
+    # Scope
+    scope = st.radio(
+        f"Where to apply `{attr_name}`?",
+        ["Entire track", "First N frames"],
+        horizontal=True,
+        key=f"scope_{attr_name}",
+    )
+
+    if scope == "First N frames":
+        num_frames = st.number_input(
+            f"N frames for `{attr_name}`",
+            min_value=1,
+            value=10,
+            step=1,
+            key=f"num_frames_{attr_name}",
+        )
+    else:
+        num_frames = None
+
+    st.markdown("---")
+
 # -----------------------------
-# Process XML
+# Apply button
 # -----------------------------
-st.markdown("---")
+if st.button("3️⃣ Apply all changes and generate modified XML", type="primary"):
 
-if st.button("Apply changes and generate modified XML", type="primary"):
-
-    if not new_value:
-        st.error("Value cannot be empty.")
-        st.stop()
-
+    # Re-parse fresh root
     root = ET.fromstring(xml_bytes)
 
-    changed_tracks = 0
-    changed_track_attrs = 0
-    changed_boxes = 0
+    total_changed_tracks = 0
+    total_changed_track_attrs = 0
+    total_changed_box_attrs = 0
 
+    # Build rules from session state (so they survive rerun)
+    rule_objects = []
+    for attr_name in selected_attrs:
+        value_choice = st.session_state.get(f"value_choice_{attr_name}")
+        if value_choice == "⟶ Custom value":
+            new_value = (st.session_state.get(f"custom_value_{attr_name}", "") or "").strip()
+        else:
+            new_value = value_choice
+
+        if not new_value:
+            st.error(f"Value for attribute `{attr_name}` cannot be empty.")
+            st.stop()
+
+        scope = st.session_state.get(f"scope_{attr_name}", "Entire track")
+        num_frames = st.session_state.get(f"num_frames_{attr_name}", None)
+        if scope == "First N frames":
+            if not num_frames or num_frames <= 0:
+                st.error(f"Invalid N for attribute `{attr_name}`.")
+                st.stop()
+        else:
+            num_frames = None
+
+        rule_objects.append({
+            "attr_name": attr_name,
+            "new_value": new_value,
+            "scope": scope,
+            "num_frames": num_frames,
+        })
+
+    # Apply rules
     for track in root.findall(".//track"):
-        if track.get("id") not in selected_track_ids:
+        t_id = track.get("id", "")
+        if t_id not in selected_track_ids:
             continue
 
-        changed_tracks += 1
+        track_changed_in_any_rule = False
 
-        # Track-level attributes
-        for attr in track.findall("attribute"):
-            if attr.get("name") == attr_name:
-                attr.text = new_value
-                changed_track_attrs += 1
+        for rule in rule_objects:
+            attr_name = rule["attr_name"]
+            new_value = rule["new_value"]
+            scope = rule["scope"]
+            num_frames = rule["num_frames"]
 
-        # Box-level attributes
-        boxes = list(track.findall("box"))
-
-        if mode == "Entire track":
-            target_boxes = boxes
-        else:
-            target_boxes = sorted(
-                boxes,
-                key=lambda b: int(b.get("frame", "0"))
-            )[:num_frames]
-
-        for box in target_boxes:
-            for attr in box.findall("attribute"):
+            # Track-level attributes
+            for attr in track.findall("attribute"):
                 if attr.get("name") == attr_name:
                     attr.text = new_value
-                    changed_boxes += 1
+                    total_changed_track_attrs += 1
+                    track_changed_in_any_rule = True
+
+            # Box-level attributes
+            boxes = list(track.findall("box"))
+            if not boxes:
+                continue
+
+            if scope == "Entire track":
+                boxes_to_change = boxes
+            else:
+                boxes_sorted = sorted(
+                    boxes,
+                    key=lambda b: int(b.get("frame", "0"))
+                )
+                boxes_to_change = boxes_sorted[: int(num_frames)]
+
+            for box in boxes_to_change:
+                for attr in box.findall("attribute"):
+                    if attr.get("name") == attr_name:
+                        attr.text = new_value
+                        total_changed_box_attrs += 1
+                        track_changed_in_any_rule = True
+
+        if track_changed_in_any_rule:
+            total_changed_tracks += 1
 
     out_bytes = ET.tostring(root, encoding="utf-8")
 
     st.success(
-        f"Updated **{attr_name} → {new_value}** in:\n"
-        f"• {changed_tracks} tracks\n"
-        f"• {changed_track_attrs} track-level attributes\n"
-        f"• {changed_boxes} box-level attributes"
+        f"Done! Applied **{len(rule_objects)} change rule(s)**.\n\n"
+        f"- Tracks affected: **{total_changed_tracks}**\n"
+        f"- Track-level attributes changed: **{total_changed_track_attrs}**\n"
+        f"- Box-level attributes changed: **{total_changed_box_attrs}**"
     )
 
     st.download_button(
