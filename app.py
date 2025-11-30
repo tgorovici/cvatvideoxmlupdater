@@ -208,4 +208,250 @@ if track_selection_mode == "Apply to ALL tracks":
         scope = st.radio(
             f"Scope for `{attr_name}`",
             ["Entire track", "Single frame range", "Multiple frame ranges"],
-            horiz
+            horizontal=True,
+            key=scope_key,
+        )
+
+        if scope == "Single frame range":
+            c1, c2 = st.columns(2)
+            with c1:
+                st.number_input(
+                    f"Start frame for `{attr_name}`",
+                    min_value=0,
+                    value=0,
+                    step=1,
+                    key=f"single_start_global_{attr_name}",
+                )
+            with c2:
+                st.number_input(
+                    f"End frame for `{attr_name}` (inclusive)",
+                    min_value=0,
+                    value=10,
+                    step=1,
+                    key=f"single_end_global_{attr_name}",
+                )
+        elif scope == "Multiple frame ranges":
+            ranges_ui(
+                key_prefix=f"global_{attr_name}",
+                label_prefix=f"{attr_name}",
+            )
+        st.markdown("---")
+
+# ---- PER-TRACK SCOPES (SPECIFIC TRACKS MODE) ----
+else:
+    for track_label in selected_track_labels:
+        t_id = track_label_to_id[track_label]
+        with st.expander(f"Track {track_label} – scopes & ranges"):
+            for attr_name in selected_attrs:
+                st.markdown(f"**Attribute `{attr_name}`**")
+
+                scope_key = f"scope_{t_id}_{attr_name}"
+                scope = st.radio(
+                    f"Scope for `{attr_name}` on track {t_id}",
+                    ["Entire track", "Single frame range", "Multiple frame ranges"],
+                    horizontal=True,
+                    key=scope_key,
+                )
+
+                if scope == "Single frame range":
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.number_input(
+                            f"Start frame ({attr_name}, track {t_id})",
+                            min_value=0,
+                            value=0,
+                            step=1,
+                            key=f"single_start_{t_id}_{attr_name}",
+                        )
+                    with c2:
+                        st.number_input(
+                            f"End frame ({attr_name}, track {t_id})",
+                            min_value=0,
+                            value=10,
+                            step=1,
+                            key=f"single_end_{t_id}_{attr_name}",
+                        )
+                elif scope == "Multiple frame ranges":
+                    ranges_ui(
+                        key_prefix=f"{t_id}_{attr_name}",
+                        label_prefix=f"{attr_name} (track {t_id})",
+                    )
+                st.markdown("---")
+
+# -----------------------------
+# 5️⃣ APPLY CHANGES
+# -----------------------------
+if st.button("5️⃣ Apply changes and download XML", type="primary"):
+
+    # Helper: get new value for attribute
+    def get_new_value(attr_name: str) -> str:
+        choice = st.session_state.get(f"value_choice_{attr_name}")
+        if choice == "⟶ Custom value":
+            return (st.session_state.get(f"custom_value_{attr_name}", "") or "").strip()
+        return choice or ""
+
+    # Validate values and ranges
+    for attr_name in selected_attrs:
+        new_val = get_new_value(attr_name)
+        if not new_val:
+            st.error(f"Value for attribute `{attr_name}` cannot be empty.")
+            st.stop()
+
+        if track_selection_mode == "Apply to ALL tracks":
+            scope = st.session_state.get(f"scope_global_{attr_name}", "Entire track")
+            if scope == "Single frame range":
+                start = st.session_state.get(f"single_start_global_{attr_name}", 0)
+                end = st.session_state.get(f"single_end_global_{attr_name}", 0)
+                if end < start:
+                    st.error(
+                        f"For `{attr_name}` (ALL tracks), end frame ({end}) "
+                        f"must be >= start frame ({start})."
+                    )
+                    st.stop()
+            elif scope == "Multiple frame ranges":
+                ranges_key = f"ranges_global_{attr_name}"
+                ranges = st.session_state.get(ranges_key, [])
+                for r in ranges:
+                    if r["end"] < r["start"]:
+                        st.error(
+                            f"For `{attr_name}` (ALL tracks), a range has end < start "
+                            f"({r['start']} – {r['end']})."
+                        )
+                        st.stop()
+        else:
+            # per track
+            for track_label in selected_track_labels:
+                t_id = track_label_to_id[track_label]
+                scope = st.session_state.get(
+                    f"scope_{t_id}_{attr_name}",
+                    "Entire track"
+                )
+                if scope == "Single frame range":
+                    start = st.session_state.get(f"single_start_{t_id}_{attr_name}", 0)
+                    end = st.session_state.get(f"single_end_{t_id}_{attr_name}", 0)
+                    if end < start:
+                        st.error(
+                            f"For `{attr_name}` on track {t_id}, end frame ({end}) "
+                            f"must be >= start frame ({start})."
+                        )
+                        st.stop()
+                elif scope == "Multiple frame ranges":
+                    ranges_key = f"ranges_{t_id}_{attr_name}"
+                    ranges = st.session_state.get(ranges_key, [])
+                    for r in ranges:
+                        if r["end"] < r["start"]:
+                            st.error(
+                                f"For `{attr_name}` on track {t_id}, a range has end < start "
+                                f"({r['start']} – {r['end']})."
+                            )
+                            st.stop()
+
+    # Re-parse fresh for modifications
+    new_root = ET.fromstring(xml_bytes)
+
+    total_changed_tracks = 0
+    total_changed_track_attrs = 0
+    total_changed_box_attrs = 0
+
+    for track in new_root.findall(".//track"):
+        t_id = track.get("id", "")
+        if t_id not in selected_track_ids:
+            continue
+
+        track_changed = False
+
+        for attr_name in selected_attrs:
+            new_val = get_new_value(attr_name)
+
+            # Determine scope & ranges for this track+attr
+            if track_selection_mode == "Apply to ALL tracks":
+                scope = st.session_state.get(
+                    f"scope_global_{attr_name}",
+                    "Entire track"
+                )
+                if scope == "Entire track":
+                    ranges = None  # means "all frames"
+                elif scope == "Single frame range":
+                    start = st.session_state.get(
+                        f"single_start_global_{attr_name}", 0
+                    )
+                    end = st.session_state.get(
+                        f"single_end_global_{attr_name}", 0
+                    )
+                    ranges = [{"start": start, "end": end}]
+                else:  # Multiple frame ranges
+                    ranges = st.session_state.get(
+                        f"ranges_global_{attr_name}", []
+                    )
+            else:
+                scope = st.session_state.get(
+                    f"scope_{t_id}_{attr_name}",
+                    "Entire track"
+                )
+                if scope == "Entire track":
+                    ranges = None
+                elif scope == "Single frame range":
+                    start = st.session_state.get(
+                        f"single_start_{t_id}_{attr_name}", 0
+                    )
+                    end = st.session_state.get(
+                        f"single_end_{t_id}_{attr_name}", 0
+                    )
+                    ranges = [{"start": start, "end": end}]
+                else:
+                    ranges = st.session_state.get(
+                        f"ranges_{t_id}_{attr_name}", []
+                    )
+
+            # 1) Track-level attributes: always updated for selected tracks
+            for attr in track.findall("attribute"):
+                if attr.get("name") == attr_name:
+                    attr.text = new_val
+                    total_changed_track_attrs += 1
+                    track_changed = True
+
+            # 2) Box-level attributes: obey scope/ranges
+            boxes = list(track.findall("box"))
+            if not boxes:
+                continue
+
+            if ranges is None:  # Entire track
+                boxes_to_change = boxes
+            else:
+                boxes_to_change = []
+                for box in boxes:
+                    try:
+                        frame_idx = int(box.get("frame", "0"))
+                    except ValueError:
+                        frame_idx = 0
+                    if any(
+                        r["start"] <= frame_idx <= r["end"]
+                        for r in ranges
+                    ):
+                        boxes_to_change.append(box)
+
+            for box in boxes_to_change:
+                for attr in box.findall("attribute"):
+                    if attr.get("name") == attr_name:
+                        attr.text = new_val
+                        total_changed_box_attrs += 1
+                        track_changed = True
+
+        if track_changed:
+            total_changed_tracks += 1
+
+    out_bytes = ET.tostring(new_root, encoding="utf-8")
+
+    st.success(
+        f"Done! Modified XML:\n"
+        f"- Tracks affected: **{total_changed_tracks}**\n"
+        f"- Track-level attributes changed: **{total_changed_track_attrs}**\n"
+        f"- Box-level attributes changed: **{total_changed_box_attrs}**"
+    )
+
+    st.download_button(
+        "📥 Download modified XML",
+        data=out_bytes,
+        file_name=f"modified_{uploaded_file.name}",
+        mime="application/xml",
+    )
